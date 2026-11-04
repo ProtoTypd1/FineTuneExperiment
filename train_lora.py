@@ -1,5 +1,4 @@
 import json
-import re
 
 import torch
 from datasets import Dataset
@@ -11,8 +10,12 @@ from trl import SFTConfig, SFTTrainer
 # 0. Config
 # ==========================================
 MODEL_ID = "EleutherAI/pythia-1b-deduped"
-DATASET_PATH = "your_dataset.json"  # list of {"problem": ..., "ground_truth": ...}
-OUTPUT_DIR = "./pythia_1b_lora_adapter"
+import sys
+# Pass the dataset and an output dir per arm, e.g.:
+#   python train_lora.py data_cot.json ./adapter_cot
+#   python train_lora.py data_answer.json ./adapter_answer
+DATASET_PATH = sys.argv[1] if len(sys.argv) > 1 else "data_cot.json"
+OUTPUT_DIR = sys.argv[2] if len(sys.argv) > 2 else "./pythia_1b_lora_adapter"
 
 use_bf16 = torch.cuda.is_bf16_supported()
 dtype = torch.bfloat16 if use_bf16 else torch.float16
@@ -35,17 +38,11 @@ tokenizer.pad_token = "<|padding|>"
 # NOTE: this template must match inference.py exactly.
 PROMPT_TEMPLATE = (
     "### Instruction:\n"
-    "Solve the following logic problem and provide the final option letter.\n\n"
+    "Solve the following problem. "
+    "End with 'FINAL ANSWER:' followed by only the answer.\n\n"
     "{problem}\n\n"
     "### Response:\n"
 )
-
-
-def normalize_answer(ground_truth):
-  """Reduce '(B) Task A' / 'B' / 'b)' to just the letter 'B'."""
-  s = str(ground_truth).strip()
-  m = re.match(r"^\(?([A-Za-z])\)?(?:\W|$)", s)
-  return m.group(1).upper() if m else s
 
 
 def load_and_format_dataset(json_file_path):
@@ -56,24 +53,33 @@ def load_and_format_dataset(json_file_path):
     raw_data = [raw_data]
 
   samples = []
-  odd_answers = 0
   for item in raw_data:
     problem = item.get("problem", "")
-    answer = normalize_answer(item.get("ground_truth", ""))
-    if not re.fullmatch(r"[A-Z]", answer):
-      odd_answers += 1
+    answer = str(item.get("ground_truth", "")).strip()
+    # CoT arm: item has a "response" (written reasoning ending in "FINAL ANSWER: X").
+    # Answer-only arm: no "response", so the target is just "FINAL ANSWER: X".
+    response = (item.get("response") or "").strip()
+    target = response if response else f"FINAL ANSWER: {answer}"
 
     samples.append({
-        "prompt": PROMPT_TEMPLATE.format(problem=problem),
-        "completion": f"FINAL ANSWER: {answer}{tokenizer.eos_token}",
+        "prompt": PROMPT_TEMPLATE.format(problem=problem.strip()),
+        "completion": f"{target}{tokenizer.eos_token}",
     })
 
-  if odd_answers:
-    print(f"WARNING: {odd_answers}/{len(samples)} answers are not a single letter.")
   return Dataset.from_list(samples)
 
 
+MAX_LENGTH = 2048  # Pythia's context window
+
 dataset = load_and_format_dataset(DATASET_PATH)
+
+# Truncation would cut off the FINAL ANSWER line, so drop samples that don't fit.
+def _fits(ex):
+  return len(tokenizer(ex["prompt"] + ex["completion"])["input_ids"]) <= MAX_LENGTH
+
+n_before = len(dataset)
+dataset = dataset.filter(_fits)
+print(f"Dropped {n_before - len(dataset)} samples longer than {MAX_LENGTH} tokens; {len(dataset)} remain.")
 
 # Hold out 10% to watch for overfitting (needs more than a handful of examples)
 split = dataset.train_test_split(test_size=0.1, seed=42)
@@ -86,6 +92,7 @@ print(f"Train: {len(train_dataset)}  Eval: {len(eval_dataset)}")
 model = AutoModelForCausalLM.from_pretrained(
     MODEL_ID,
     torch_dtype=dtype,
+    attn_implementation="sdpa",  # PyTorch fused attention; no flash-attn install needed
     device_map="auto",
 )
 
@@ -112,7 +119,7 @@ peft_config = LoraConfig(
 # ==========================================
 sft_config = SFTConfig(
     output_dir=OUTPUT_DIR,
-    max_length=1024,  # was max_seq_length in older TRL
+    max_length=MAX_LENGTH,
     completion_only_loss=True,  # loss on the completion only, not the prompt
     per_device_train_batch_size=4,
     per_device_eval_batch_size=4,
