@@ -1,0 +1,10 @@
+# Lower bounds, not exact pins. The script uses newer TRL argument names
+# (max_length, processing_class, completion_only_loss).
+# On Linux the default PyPI torch wheel is a CUDA build; if you need a specific
+# CUDA version, install torch from pytorch.org first, then run pip install -r.
+torch>=2.4
+transformers>=4.50
+trl>=0.20
+peft>=0.14
+datasets>=3.0
+accelerate>=1.0
