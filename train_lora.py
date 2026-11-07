@@ -117,17 +117,23 @@ peft_config = LoraConfig(
 # ==========================================
 # 5. Training arguments
 # ==========================================
+# Explicit warmup steps (3% of training). Works across transformers versions:
+# newer ones removed warmup_ratio, older ones don't accept a fractional warmup_steps.
+BATCH_SIZE, GRAD_ACCUM, EPOCHS = 4, 4, 3
+steps_per_epoch = max(1, -(-len(train_dataset) // (BATCH_SIZE * GRAD_ACCUM)))
+WARMUP_STEPS = max(1, int(0.03 * steps_per_epoch * EPOCHS))
+
 sft_config = SFTConfig(
     output_dir=OUTPUT_DIR,
     max_length=MAX_LENGTH,
     completion_only_loss=True,  # loss on the completion only, not the prompt
-    per_device_train_batch_size=4,
+    per_device_train_batch_size=BATCH_SIZE,
     per_device_eval_batch_size=4,
-    gradient_accumulation_steps=4,  # effective batch size 16
+    gradient_accumulation_steps=GRAD_ACCUM,  # effective batch size 16
     learning_rate=3e-4,
-    warmup_ratio=0.03,
+    warmup_steps=WARMUP_STEPS,
     lr_scheduler_type="cosine",
-    num_train_epochs=3,
+    num_train_epochs=EPOCHS,
     logging_steps=10,
     eval_strategy="epoch",  # was evaluation_strategy in older transformers
     save_strategy="epoch",
