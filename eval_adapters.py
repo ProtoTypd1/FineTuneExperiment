@@ -202,7 +202,7 @@ def main():
                   help="where Hugging Face datasets are cached, e.g. ./datasets if that's where "
                        "generate_trajectories.py downloaded them (default: the normal HF cache)")
   ap.add_argument("--seed", type=int, default=42)
-  ap.add_argument("--cache-dir", default=None,
+  ap.add_argument("--cache-location", default=None,
                   help="Where Hugging Face datasets are cached (e.g. ./datasets). Once the data is "
                        "there, set HF_DATASETS_OFFLINE=1 to run with no network.")
   ap.add_argument("--export", default=None,
