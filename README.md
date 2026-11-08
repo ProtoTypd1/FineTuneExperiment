@@ -14,4 +14,13 @@ nonreasoning was trained using this command
 ```python train_lora.py data_cot.json ./adapter_nonreasoning```
 
 reasoning was trained using this command
-```python train_lora.py data_think.json ./adatper_reasoning```
+```python train_lora.py data_think.json ./adapter_reasoning```
+
+answer was trained using this command
+```python train_lora.py data_answer.json ./adapter_answer```
+
+
+
+The results were evaluated using this command
+```python eval_adapters.py data_heldout.json ./adapter_answer:24 ./adapter_reasoning ./adapter_nonreasoning/ --save results.json```
+This command saves the inference results, which is a seperate test suite, to results.json
