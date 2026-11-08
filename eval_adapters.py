@@ -4,16 +4,20 @@ with an automatic fallback to Hugging Face (on laptop/CPU).
 Usage:
   python eval_adapters_vllm.py ./adapter_answer:24 ./adapter_reasoning ./adapter_nonreasoning/ --save results.json
 """
+import os
+
+# vLLM starts its engine in a child process. Once CUDA has been touched in this process
+# (torch.cuda.is_available() etc.), a *forked* child can't use CUDA, which is the
+# "Cannot re-initialize CUDA in forked subprocess" error. Spawn avoids it.
+os.environ.setdefault("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
+
 import argparse
 import json
-import os
 import re
 import time
 from collections import Counter, defaultdict
 
 import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer
-from peft import PeftModel
 
 BASE_MODEL_ID = "EleutherAI/pythia-1b-deduped"
 CONTEXT = 2048
@@ -126,19 +130,14 @@ def main():
   ap.add_argument("--n", type=int, default=100, help="Questions per dataset (default 100)")
   ap.add_argument("--cache-dir", default=None, help="Hugging Face cache directory.")
   ap.add_argument("--seed", type=int, default=42)
-<<<<<<< HEAD
-=======
-  ap.add_argument("--cache-location", default=None,
-                  help="Where Hugging Face datasets are cached (e.g. ./datasets). Once the data is "
-                       "there, set HF_DATASETS_OFFLINE=1 to run with no network.")
-  ap.add_argument("--export", default=None,
-                  help="Save the sampled questions to this JSON file and exit (no model needed). "
-                       "Reuse later with --data FILE for a fully offline run.")
->>>>>>> 19f0b1f7cf92a1a22895371635d9c53c38bcc9b0
   ap.add_argument("adapters", nargs="*", help="path or path:max_new_tokens")
   ap.add_argument("--batch-size", type=int, default=8, help="Batch size (used for HF fallback mode)")
   ap.add_argument("--limit", type=int, default=None)
   ap.add_argument("--save", default=None)
+  ap.add_argument("--gpu-mem", type=float, default=0.6,
+                  help="Fraction of GPU memory vLLM may use (default 0.6; vLLM's own default is 0.9)")
+  ap.add_argument("--eager", action="store_true",
+                  help="Disable CUDA graphs (slower, but avoids some startup crashes)")
   args = ap.parse_args()
 
   adapter_args = args.adapters
@@ -191,6 +190,8 @@ def main():
         enable_lora=True,
         max_model_len=CONTEXT,
         tensor_parallel_size=1,
+        gpu_memory_utilization=args.gpu_mem,
+        enforce_eager=args.eager,
     )
 
     for idx, (path, max_new) in enumerate(specs):
@@ -218,11 +219,14 @@ def main():
 
   else:
     print(f"\n[Laptop CPU Mode] No GPU found. Falling back to Hugging Face execution for local testing...")
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+    from peft import PeftModel
+
     tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL_ID)
-    tokenizer.pad_token = tokenizer.eos_token
+    tokenizer.pad_token = "<|padding|>"  # same pad token as training
     tokenizer.padding_side = "left"
 
-    base = AutoModelForCausalLM.from_pretrained(BASE_Model_ID if 'BASE_Model_ID' in globals() else BASE_MODEL_ID, torch_dtype=torch.float32)
+    base = AutoModelForCausalLM.from_pretrained(BASE_MODEL_ID, torch_dtype=torch.float32)
     model = None
     for i, (path, _) in enumerate(specs):
       name = f"adapter_{i}"
