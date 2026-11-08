@@ -1,27 +1,63 @@
-"""Score one or more Pythia-1B LoRA adapters using vLLM (on desktop GPU)
-with an automatic fallback to Hugging Face (on laptop/CPU).
+"""Score one or more Pythia-1B LoRA adapters on held-out questions.
 
 Usage:
-  python eval_adapters_vllm.py ./adapter_answer:24 ./adapter_reasoning ./adapter_nonreasoning/ --save results.json
+  # default: 100 random test-split questions from EACH dataset (arc, gsm8k)
+  python eval_adapters.py ./adapter_answer:24 ./adapter_cot ./adapter_think
+
+  # one number for every dataset
+  python eval_adapters.py --n 50 ./adapter_cot
+
+  # or per-dataset counts / a subset of datasets
+  python eval_adapters.py --hf arc:200,gsm8k:50 ./adapter_cot
+  python eval_adapters.py --hf gsm8k --n 300 ./adapter_cot
+
+  # reuse datasets already downloaded by the generator (and never touch the network)
+  HF_DATASETS_OFFLINE=1 python eval_adapters.py --cache-dir ./datasets ./adapter_cot
+
+  # download + save the questions once, then run fully offline from the saved file
+  python eval_adapters.py --export questions.json
+  python eval_adapters.py --data questions.json ./adapter_cot
+
+  # use your own held-out file instead (from prepare_data.py), alone or combined with --hf
+  python eval_adapters.py --data data_heldout.json ./adapter_cot
+
+Each adapter is  path  or  path:max_new_tokens  (default 1500). Use a small budget
+(~24) for answer-only adapters and ~1500 for reasoning adapters.
+
+By default all adapters are loaded at once and their jobs are mixed into the same batches
+(PEFT "mixed adapter batches": the base-model math is shared, each row uses its own LoRA).
+Use --sequential to run one adapter at a time instead.
+
+Options:
+  --n N            questions per dataset (default 100)
+  --cache-dir DIR  Hugging Face cache location
+  --hf SPEC        datasets, comma separated, each optionally with :count (available: arc, gsm8k).
+                   Questions come from each dataset's TEST split, which the trajectory
+                   generator never used (it read the train splits). Seeded, so every
+                   run and every adapter sees the same questions.
+  --data FILE      held-out JSON with problem / ground_truth (optional)
+  --seed N         shuffle seed for --hf sampling (default 42)
+  --sequential     one adapter at a time (fallback if mixed batching errors on your PEFT version)
+  --batch-size N   sequences generated at once (default 24 mixed / 8 sequential; lower it
+                   if you run out of memory)
+  --limit N        only evaluate the first N questions
+  --save FILE      write every generation and its score to FILE (JSON)
 """
-import os
-
-# vLLM starts its engine in a child process. Once CUDA has been touched in this process
-# (torch.cuda.is_available() etc.), a *forked* child can't use CUDA, which is the
-# "Cannot re-initialize CUDA in forked subprocess" error. Spawn avoids it.
-os.environ.setdefault("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
-
 import argparse
 import json
+import os
 import re
 import time
 from collections import Counter, defaultdict
 
 import torch
+from peft import PeftModel
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
 BASE_MODEL_ID = "EleutherAI/pythia-1b-deduped"
 CONTEXT = 2048
 
+# Must match train_lora.py / inference.py exactly.
 PROMPT_TEMPLATE = (
     "### Instruction:\n"
     "Solve the following problem. "
@@ -33,6 +69,9 @@ PROMPT_TEMPLATE = (
 FINAL_RE = re.compile(r"FINAL ANSWER:\s*(.+)", re.IGNORECASE)
 
 
+# ---------------------------------------------------------------------------
+# Scoring
+# ---------------------------------------------------------------------------
 def normalize(text):
   t = text.strip().rstrip(".").strip()
   m = re.fullmatch(r"\(?([A-Za-z])\)?", t)
@@ -56,7 +95,7 @@ def answers_match(pred, gold):
 
 
 # ---------------------------------------------------------------------------
-# Hugging Face Questions Loader
+# Hugging Face questions (formatted exactly like generate_trajectories.py)
 # ---------------------------------------------------------------------------
 LETTERS = "ABCDEFGHIJ"
 
@@ -77,7 +116,7 @@ def load_arc(n, seed, cache_dir=None):
     if not texts or key not in labels:
       continue
     out.append({"problem": format_mcq(ex["question"], texts),
-                "ground_truth": LETTERS[labels.index(key)],
+                "ground_truth": LETTERS[labels.index(key)],  # options are re-lettered A, B, C...
                 "domain": "arc"})
     if len(out) >= n:
       break
@@ -116,187 +155,196 @@ def parse_hf_spec(spec, default_count=100):
   return pairs
 
 
+# ---------------------------------------------------------------------------
+# Generation
+# ---------------------------------------------------------------------------
+def generate_batch(model, tokenizer, prompts, max_new_tokens, adapter_names=None):
+  enc = tokenizer(prompts, return_tensors="pt", padding=True).to(model.device)
+  prompt_len = enc["input_ids"].shape[1]
+  budget = min(max_new_tokens, CONTEXT - prompt_len)
+  if budget < 1:  # prompt alone fills the context window
+    return [""] * len(prompts), [0] * len(prompts)
+
+  extra = {"adapter_names": adapter_names} if adapter_names is not None else {}
+  with torch.no_grad():
+    out = model.generate(
+        **enc,
+        **extra,
+        max_new_tokens=budget,
+        do_sample=False,
+        eos_token_id=tokenizer.eos_token_id,
+        pad_token_id=tokenizer.pad_token_id,
+    )
+  gen = out[:, prompt_len:]
+  texts = tokenizer.batch_decode(gen, skip_special_tokens=True)
+  counts = (gen != tokenizer.pad_token_id).sum(dim=1).tolist()
+  return texts, counts
+
+
 def parse_adapter_arg(arg):
   path, sep, tail = arg.rpartition(":")
   if sep and tail.isdigit():
-    return path.rstrip("/"), int(tail)
-  return arg.rstrip("/"), 1500
+    return path, int(tail)
+  return arg, 1500
 
 
 def main():
-  ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-  ap.add_argument("--data", default=None, help="Held-out JSON file.")
-  ap.add_argument("--hf", default=None, help="Datasets to use, e.g. arc,gsm8k or arc:200,gsm8k:50")
-  ap.add_argument("--n", type=int, default=100, help="Questions per dataset (default 100)")
-  ap.add_argument("--cache-dir", default=None, help="Hugging Face cache directory.")
+  ap = argparse.ArgumentParser(description=__doc__,
+                               formatter_class=argparse.RawDescriptionHelpFormatter)
+  ap.add_argument("--data", default=None,
+                  help="Held-out JSON from prepare_data.py (problem, ground_truth).")
+  ap.add_argument("--hf", default=None,
+                  help="datasets to use, e.g. arc,gsm8k or arc:200,gsm8k:50 "
+                       "(default when neither --data nor --hf is given: all of them)")
+  ap.add_argument("--n", type=int, default=100,
+                  help="questions per dataset, for every --hf entry without its own :count (default 100)")
   ap.add_argument("--seed", type=int, default=42)
+  ap.add_argument("--cache-dir", default=None,
+                  help="Where Hugging Face datasets are cached (e.g. ./datasets). Once the data is "
+                       "there, set HF_DATASETS_OFFLINE=1 to run with no network.")
+  ap.add_argument("--export", default=None,
+                  help="Save the sampled questions to this JSON file and exit (no model needed). "
+                       "Reuse later with --data FILE for a fully offline run.")
   ap.add_argument("adapters", nargs="*", help="path or path:max_new_tokens")
-  ap.add_argument("--batch-size", type=int, default=8, help="Batch size (used for HF fallback mode)")
+  ap.add_argument("--sequential", action="store_true")
+  ap.add_argument("--batch-size", type=int, default=None)
   ap.add_argument("--limit", type=int, default=None)
   ap.add_argument("--save", default=None)
-  ap.add_argument("--gpu-mem", type=float, default=0.6,
-                  help="Fraction of GPU memory vLLM may use (default 0.6; vLLM's own default is 0.9)")
-  ap.add_argument("--eager", action="store_true",
-                  help="Disable CUDA graphs (slower, but avoids some startup crashes)")
   args = ap.parse_args()
 
-  adapter_args = args.adapters
-  if not adapter_args:
-    raise SystemExit("No adapters given. Example: python eval_adapters_vllm.py ./adapter_cot ./adapter_answer:24")
-
-  specs = []
-  for a in adapter_args:
-    path, max_new = parse_adapter_arg(a)
+  # Backward compatible: a .json file among the positionals is a question file, not an adapter.
+  data_files = [args.data] if args.data else []
+  adapter_args = []
+  for a in args.adapters:
+    (data_files if a.lower().endswith(".json") else adapter_args).append(a)
+  if not adapter_args and not args.export:
+    raise SystemExit("No adapters given. Example: python eval_adapters.py ./adapter_cot ./adapter_answer:24")
+  args.adapters = adapter_args
+  for path in (parse_adapter_arg(a)[0] for a in adapter_args):
     if not os.path.isfile(os.path.join(path, "adapter_config.json")):
-      raise SystemExit(f"'{path}' is not a valid PEFT adapter folder (missing adapter_config.json).")
-    specs.append((path, max_new))
+      raise SystemExit(f"'{path}' is not a trained adapter folder (no adapter_config.json inside).")
 
   items = []
-  data_files = [args.data] if args.data else []
   for data_file in data_files:
     with open(data_file, "r", encoding="utf-8") as f:
       items.extend(json.load(f))
     print(f"Loaded {len(items)} questions from {data_file}")
-
-  hf_spec = args.hf or (None if data_files else "arc:100,gsm8k:100")
+  hf_spec = args.hf or (None if data_files else ",".join(HF_LOADERS))
   if hf_spec:
     for name, count in parse_hf_spec(hf_spec, args.n):
       got = HF_LOADERS[name](count, args.seed, args.cache_dir)
       print(f"Loaded {len(got)} {name} test questions from Hugging Face")
       items.extend(got)
-
   if not items:
     raise SystemExit("No questions to evaluate.")
   if args.limit:
     items = items[: args.limit]
+  if args.export:
+    with open(args.export, "w", encoding="utf-8") as f:
+      json.dump(items, f, indent=2, ensure_ascii=False)
+    print(f"Saved {len(items)} questions to {args.export}. Use it with: --data {args.export}")
+    return
 
   prompts = [PROMPT_TEMPLATE.format(problem=it["problem"].strip()) for it in items]
 
   gold_counts = Counter(normalize(it["ground_truth"]) for it in items)
   majority = gold_counts.most_common(1)[0][1] / len(items)
-  print(f"{len(items)} held-out questions. Baseline (most common answer): {majority:.0%}")
+  print(f"{len(items)} held-out questions. Always guessing the most common answer: {majority:.0%}")
 
-  use_vllm = torch.cuda.is_available()
-  all_results = {}
+  tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL_ID)
+  tokenizer.pad_token = "<|padding|>"
+  tokenizer.padding_side = "left"  # required for batched generation with a decoder-only model
+
+  base = AutoModelForCausalLM.from_pretrained(
+      BASE_MODEL_ID,
+      torch_dtype=torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16,
+      attn_implementation="sdpa",
+      device_map="auto",
+  )
+
+  specs = [parse_adapter_arg(a) for a in args.adapters]
+  model = None
+  for i, (path, _) in enumerate(specs):
+    name = f"adapter_{i}"
+    if model is None:
+      model = PeftModel.from_pretrained(base, path, adapter_name=name)
+    else:
+      model.load_adapter(path, adapter_name=name)
+  model.eval()
+
+  batch_size = args.batch_size or (8 if args.sequential else 24)
+
+  def make_result(j, text, n_tok):
+    pred = extract_answer(text)
+    return {
+        "index": j,
+        "domain": items[j].get("domain", "all"),
+        "gold": items[j]["ground_truth"],
+        "pred": pred,
+        "correct": answers_match(pred, items[j]["ground_truth"]),
+        "generated_tokens": n_tok,
+        "generation": text,
+    }
+
+  all_results = {path: [] for path, _ in specs}
   t0 = time.time()
 
-  if use_vllm:
-    print(f"\n[GPU Desktop Mode] Initializing vLLM engine with base model: {BASE_MODEL_ID}...")
-    from vllm import LLM, SamplingParams
-    from vllm.lora.request import LoRARequest
-
-    llm = LLM(
-        model=BASE_MODEL_ID,
-        enable_lora=True,
-        max_model_len=CONTEXT,
-        tensor_parallel_size=1,
-        gpu_memory_utilization=args.gpu_mem,
-        enforce_eager=args.eager,
-    )
-
-    for idx, (path, max_new) in enumerate(specs):
-      print(f"\n=== Evaluating Adapter via vLLM: {path} (max_tokens={max_new}) ===")
-      sampling_params = SamplingParams(temperature=0.0, max_tokens=max_new, stop=["<|endoftext|>"])
-      lora_request = LoRARequest(f"adapter_{idx}", idx + 1, path)
-
-      outputs = llm.generate(prompts, sampling_params, lora_request=lora_request)
-
-      results = []
-      for j, output in enumerate(outputs):
-        text = output.outputs[0].text
-        n_tok = len(output.outputs[0].token_ids)
-        pred = extract_answer(text)
-        results.append({
-            "index": j,
-            "domain": items[j].get("domain", "all"),
-            "gold": items[j]["ground_truth"],
-            "pred": pred,
-            "correct": answers_match(pred, items[j]["ground_truth"]),
-            "generated_tokens": n_tok,
-            "generation": text,
-        })
-      all_results[path] = results
-
-  else:
-    print(f"\n[Laptop CPU Mode] No GPU found. Falling back to Hugging Face execution for local testing...")
-    from transformers import AutoModelForCausalLM, AutoTokenizer
-    from peft import PeftModel
-
-    tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL_ID)
-    tokenizer.pad_token = "<|padding|>"  # same pad token as training
-    tokenizer.padding_side = "left"
-
-    base = AutoModelForCausalLM.from_pretrained(BASE_MODEL_ID, torch_dtype=torch.float32)
-    model = None
-    for i, (path, _) in enumerate(specs):
-      name = f"adapter_{i}"
-      if model is None:
-        model = PeftModel.from_pretrained(base, path, adapter_name=name)
-      else:
-        model.load_adapter(path, adapter_name=name)
-    model.eval()
-
-    def generate_hf_batch(prompts_batch, max_new_tokens):
-      enc = tokenizer(prompts_batch, return_tensors="pt", padding=True)
-      prompt_len = enc["input_ids"].shape[1]
-      budget = min(max_new_tokens, CONTEXT - prompt_len)
-      if budget < 1:
-        return [""] * len(prompts_batch), [0] * len(prompts_batch)
-      with torch.no_grad():
-        out = model.generate(
-            **enc,
-            max_new_tokens=budget,
-            do_sample=False,
-            eos_token_id=tokenizer.eos_token_id,
-            pad_token_id=tokenizer.pad_token_id,
-        )
-      gen = out[:, prompt_len:]
-      texts = tokenizer.batch_decode(gen, skip_special_tokens=True)
-      counts = (gen != tokenizer.pad_token_id).sum(dim=1).tolist()
-      return texts, counts
-
+  if args.sequential:
     for i, (path, max_new) in enumerate(specs):
-      adapter_name = f"adapter_{i}"
-      model.set_adapter(adapter_name)
-      print(f"\n=== Evaluating Adapter via Hugging Face: {path} (max_new_tokens={max_new}) ===")
-
+      model.set_adapter(f"adapter_{i}")
+      print(f"\n=== {path}  (max_new_tokens={max_new}) ===")
       order = sorted(range(len(items)), key=lambda j: len(prompts[j]))
-      results_temp = [None] * len(items)
-
-      for start in range(0, len(order), args.batch_size):
-        idx = order[start : start + args.batch_size]
-        texts, counts = generate_hf_batch([prompts[j] for j in idx], max_new)
+      for start in range(0, len(order), batch_size):
+        idx = order[start : start + batch_size]
+        texts, counts = generate_batch(model, tokenizer, [prompts[j] for j in idx], max_new)
         for j, text, n_tok in zip(idx, texts, counts):
-          pred = extract_answer(text)
-          results_temp[j] = {
-              "index": j,
-              "domain": items[j].get("domain", "all"),
-              "gold": items[j]["ground_truth"],
-              "pred": pred,
-              "correct": answers_match(pred, items[j]["ground_truth"]),
-              "generated_tokens": n_tok,
-              "generation": text,
-          }
-        print(f"  Processed {min(start + args.batch_size, len(order))}/{len(order)}", end="\r")
+          all_results[path].append(make_result(j, text, n_tok))
+        print(f"  {min(start + batch_size, len(order))}/{len(order)}", end="\r")
       print()
-      all_results[path] = results_temp
-
-  print(f"\nEvaluation completed in {time.time() - t0:.0f}s")
+  else:
+    # One job per (adapter, question). Jobs with the same token budget are batched
+    # together, ordered by prompt length, so different adapters share each batch.
+    jobs = [(i, j) for i in range(len(specs)) for j in range(len(items))]
+    jobs.sort(key=lambda ij: (specs[ij[0]][1], len(prompts[ij[1]]), ij[1], ij[0]))
+    print(f"\nMixed-adapter mode: {len(jobs)} generations in batches of {batch_size}")
+    for start in range(0, len(jobs), batch_size):
+      chunk = jobs[start : start + batch_size]
+      budget = max(specs[i][1] for i, _ in chunk)
+      texts, counts = generate_batch(
+          model, tokenizer,
+          [prompts[j] for _, j in chunk],
+          budget,
+          adapter_names=[f"adapter_{i}" for i, _ in chunk],
+      )
+      for (i, j), text, n_tok in zip(chunk, texts, counts):
+        all_results[specs[i][0]].append(make_result(j, text, n_tok))
+      print(f"  {min(start + batch_size, len(jobs))}/{len(jobs)}", end="\r")
+    print()
+  print(f"Generation took {time.time() - t0:.0f}s")
 
   summary = []
   for path, _ in specs:
-    results = all_results[path]
+    results = sorted(all_results[path], key=lambda r: r["index"])
+    all_results[path] = results
     n = len(results)
     correct = sum(r["correct"] for r in results)
     no_format = sum(r["pred"] is None for r in results)
     avg_tok = sum(r["generated_tokens"] for r in results) / n
     summary.append((path, n, correct, no_format, avg_tok))
 
+    by_domain = defaultdict(lambda: [0, 0])
+    for r in results:
+      by_domain[r["domain"]][0] += r["correct"]
+      by_domain[r["domain"]][1] += 1
+    print(f"\n{path}")
+    for d, (c, t) in sorted(by_domain.items()):
+      print(f"  {d:<12} {c}/{t} = {c / t:.0%}")
+
   print("\n" + "=" * 78)
-  print(f"{'ADAPTER':<34} {'ACC':>6} {'CORRECT':>9} {'NO \"FINAL ANSWER\"':>18} {'AVG TOK':>8}")
+  print(f"{'ADAPTER':<34} {'ACC':>6} {'CORRECT':>9} {'NO "FINAL ANSWER"':>18} {'AVG TOK':>8}")
   for path, n, c, nf, avg in summary:
     print(f"{path:<34} {c / n:>6.0%} {f'{c}/{n}':>9} {nf:>18} {avg:>8.0f}")
-  print(f"{'(most-common-answer baseline)':<34} {majority:.0%}")
+  print(f"{'(most-common-answer baseline)':<34} {majority:>6.0%}")
 
   if args.save:
     with open(args.save, "w", encoding="utf-8") as f:
