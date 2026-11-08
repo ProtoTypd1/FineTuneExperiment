@@ -8,3 +8,6 @@ trl>=0.20
 peft>=0.14
 datasets>=3.0
 accelerate>=1.0
+vllm
+#pip install llama-cpp-python for cpu only
+#CMAKE_ARGS="-DGGML_CUDA=on" pip install llama-cpp-python --force-reinstall --no-cache-dir for cuda
