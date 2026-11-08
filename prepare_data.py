@@ -8,6 +8,8 @@ Outputs (same kept rows in each):
   <out>_think.json   same, but each turn's hidden reasoning_content is prepended as <think>...</think>
                      (only differs from _cot for rows generated with thinking enabled)
   <out>_answer.json  problem, ground_truth             target is just "FINAL ANSWER: X"
+  <out>_heldout.json problem, ground_truth, domain     questions removed from all three files above,
+                                                       for eval_adapters.py (split by problem, seeded)
 
 Usage:
   python prepare_data.py ./output/ --out data --verified-only
@@ -16,6 +18,7 @@ Usage:
 import argparse
 import json
 import pathlib
+import random
 import re
 from collections import Counter
 
@@ -141,6 +144,9 @@ def main():
   ap.add_argument("--out", default="data")
   ap.add_argument("--verified-only", action="store_true",
                   help="In a directory, only read files with 'verified' in the name.")
+  ap.add_argument("--holdout", type=float, default=0.1,
+                  help="Fraction of unique problems (per domain) held out for evaluation. 0 disables.")
+  ap.add_argument("--seed", type=int, default=42)
   args = ap.parse_args()
 
   root = pathlib.Path(args.input)
@@ -162,6 +168,24 @@ def main():
         kept += 1
     stats[path.name] = (len(rows), kept, skipped)
 
+  # Hold out whole problems (by problem text) so no variant trains on an eval question.
+  rng = random.Random(args.seed)
+  by_domain = {}
+  for s in samples:
+    by_domain.setdefault(s["domain"], set()).add(s["problem"])
+  held = set()
+  for probs in by_domain.values():
+    uniq = sorted(probs)
+    rng.shuffle(uniq)
+    held.update(uniq[:int(round(args.holdout * len(uniq)))])
+  heldout, seen = [], set()
+  for s in samples:
+    if s["problem"] in held and s["problem"] not in seen:
+      seen.add(s["problem"])
+      heldout.append({"problem": s["problem"], "ground_truth": s["ground_truth"],
+                      "domain": s["domain"], "source_index": s["source_index"]})
+  samples = [s for s in samples if s["problem"] not in held]
+
   meta = ("domain", "thinking_enabled", "source_index")
   def dump(suffix, items):
     p = pathlib.Path(f"{args.out}_{suffix}.json")
@@ -175,6 +199,9 @@ def main():
                   "response": s["response_think"], **{k: s[k] for k in meta}} for s in samples])
   dump("answer", [{"problem": s["problem"], "ground_truth": s["ground_truth"],
                    **{k: s[k] for k in meta}} for s in samples])
+
+  if heldout:
+    dump("heldout", heldout)
 
   print(f"\n{'FILE':<52} {'READ':>5} {'KEPT':>5}  SKIPPED")
   for name, (n, k, sk) in stats.items():
