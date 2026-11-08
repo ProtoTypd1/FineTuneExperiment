@@ -126,6 +126,15 @@ def main():
   ap.add_argument("--n", type=int, default=100, help="Questions per dataset (default 100)")
   ap.add_argument("--cache-dir", default=None, help="Hugging Face cache directory.")
   ap.add_argument("--seed", type=int, default=42)
+<<<<<<< HEAD
+=======
+  ap.add_argument("--cache-location", default=None,
+                  help="Where Hugging Face datasets are cached (e.g. ./datasets). Once the data is "
+                       "there, set HF_DATASETS_OFFLINE=1 to run with no network.")
+  ap.add_argument("--export", default=None,
+                  help="Save the sampled questions to this JSON file and exit (no model needed). "
+                       "Reuse later with --data FILE for a fully offline run.")
+>>>>>>> 19f0b1f7cf92a1a22895371635d9c53c38bcc9b0
   ap.add_argument("adapters", nargs="*", help="path or path:max_new_tokens")
   ap.add_argument("--batch-size", type=int, default=8, help="Batch size (used for HF fallback mode)")
   ap.add_argument("--limit", type=int, default=None)
