@@ -23,4 +23,4 @@ answer was trained using this command
 
 The results were evaluated using this command
 ```python eval_adapters.py data_heldout.json ./adapter_answer:24 ./adapter_reasoning ./adapter_nonreasoning/ --save results.json```
-This command saves the inference results, which is a seperate test suite, to results.json
+This command runs inference with each LORA on 100 questions from certain datasets. It saves the inference results, which is a seperate test suite, to results.json.
