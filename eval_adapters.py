@@ -1,11 +1,22 @@
 """Score one or more Pythia-1B LoRA adapters on held-out questions.
 
 Usage:
-  # default: 100 random test-split questions each from ARC-Challenge and GSM8K (Hugging Face)
+  # default: 100 random test-split questions from EACH dataset (arc, gsm8k)
   python eval_adapters.py ./adapter_answer:24 ./adapter_cot ./adapter_think
 
-  # choose datasets / counts
+  # one number for every dataset
+  python eval_adapters.py --n 50 ./adapter_cot
+
+  # or per-dataset counts / a subset of datasets
   python eval_adapters.py --hf arc:200,gsm8k:50 ./adapter_cot
+  python eval_adapters.py --hf gsm8k --n 300 ./adapter_cot
+
+  # reuse datasets already downloaded by the generator (and never touch the network)
+  HF_DATASETS_OFFLINE=1 python eval_adapters.py --cache-dir ./datasets ./adapter_cot
+
+  # download + save the questions once, then run fully offline from the saved file
+  python eval_adapters.py --export questions.json
+  python eval_adapters.py --data questions.json ./adapter_cot
 
   # use your own held-out file instead (from prepare_data.py), alone or combined with --hf
   python eval_adapters.py --data data_heldout.json ./adapter_cot
@@ -18,7 +29,9 @@ By default all adapters are loaded at once and their jobs are mixed into the sam
 Use --sequential to run one adapter at a time instead.
 
 Options:
-  --hf SPEC        dataset:count pairs, comma separated (available: arc, gsm8k).
+  --n N            questions per dataset (default 100)
+  --cache-dir DIR  Hugging Face cache location
+  --hf SPEC        datasets, comma separated, each optionally with :count (available: arc, gsm8k).
                    Questions come from each dataset's TEST split, which the trajectory
                    generator never used (it read the train splits). Seeded, so every
                    run and every adapter sees the same questions.
@@ -92,9 +105,9 @@ def format_mcq(question, options):
   return f"{question}\n\n{body}\n\nChoose the single best option."
 
 
-def load_arc(n, seed):
+def load_arc(n, seed, cache_dir=None):
   from datasets import load_dataset
-  ds = load_dataset("allenai/ai2_arc", "ARC-Challenge", split="test").shuffle(seed=seed)
+  ds = load_dataset("allenai/ai2_arc", "ARC-Challenge", split="test", cache_dir=cache_dir).shuffle(seed=seed)
   out = []
   for ex in ds:
     choices = ex.get("choices") or {}
@@ -110,9 +123,9 @@ def load_arc(n, seed):
   return out
 
 
-def load_gsm8k(n, seed):
+def load_gsm8k(n, seed, cache_dir=None):
   from datasets import load_dataset
-  ds = load_dataset("openai/gsm8k", "main", split="test").shuffle(seed=seed)
+  ds = load_dataset("openai/gsm8k", "main", split="test", cache_dir=cache_dir).shuffle(seed=seed)
   out = []
   for ex in ds:
     m = re.search(r"####\s*(.+)", ex.get("answer", ""))
@@ -129,7 +142,7 @@ def load_gsm8k(n, seed):
 HF_LOADERS = {"arc": load_arc, "gsm8k": load_gsm8k}
 
 
-def parse_hf_spec(spec):
+def parse_hf_spec(spec, default_count=100):
   pairs = []
   for part in spec.split(","):
     part = part.strip()
@@ -138,7 +151,7 @@ def parse_hf_spec(spec):
     name, _, count = part.partition(":")
     if name not in HF_LOADERS:
       raise SystemExit(f"Unknown --hf dataset '{name}'. Available: {', '.join(HF_LOADERS)}")
-    pairs.append((name, int(count) if count else 100))
+    pairs.append((name, int(count) if count else default_count))
   return pairs
 
 
@@ -181,9 +194,21 @@ def main():
   ap.add_argument("--data", default=None,
                   help="Held-out JSON from prepare_data.py (problem, ground_truth).")
   ap.add_argument("--hf", default=None,
-                  help="e.g. arc:100,gsm8k:100 (default when neither --data nor --hf is given)")
+                  help="datasets to use, e.g. arc,gsm8k or arc:200,gsm8k:50 "
+                       "(default when neither --data nor --hf is given: all of them)")
+  ap.add_argument("--n", type=int, default=100,
+                  help="questions per dataset, for every --hf entry without its own :count (default 100)")
+  ap.add_argument("--cache-dir", default=None,
+                  help="where Hugging Face datasets are cached, e.g. ./datasets if that's where "
+                       "generate_trajectories.py downloaded them (default: the normal HF cache)")
   ap.add_argument("--seed", type=int, default=42)
-  ap.add_argument("adapters", nargs="+", help="path or path:max_new_tokens")
+  ap.add_argument("--cache-dir", default=None,
+                  help="Where Hugging Face datasets are cached (e.g. ./datasets). Once the data is "
+                       "there, set HF_DATASETS_OFFLINE=1 to run with no network.")
+  ap.add_argument("--export", default=None,
+                  help="Save the sampled questions to this JSON file and exit (no model needed). "
+                       "Reuse later with --data FILE for a fully offline run.")
+  ap.add_argument("adapters", nargs="*", help="path or path:max_new_tokens")
   ap.add_argument("--sequential", action="store_true")
   ap.add_argument("--batch-size", type=int, default=None)
   ap.add_argument("--limit", type=int, default=None)
@@ -195,7 +220,7 @@ def main():
   adapter_args = []
   for a in args.adapters:
     (data_files if a.lower().endswith(".json") else adapter_args).append(a)
-  if not adapter_args:
+  if not adapter_args and not args.export:
     raise SystemExit("No adapters given. Example: python eval_adapters.py ./adapter_cot ./adapter_answer:24")
   args.adapters = adapter_args
   for path in (parse_adapter_arg(a)[0] for a in adapter_args):
@@ -210,13 +235,19 @@ def main():
   hf_spec = args.hf or (None if data_files else "arc:100,gsm8k:100")
   if hf_spec:
     for name, count in parse_hf_spec(hf_spec):
-      got = HF_LOADERS[name](count, args.seed)
+      got = HF_LOADERS[name](count, args.seed, args.cache_dir)
       print(f"Loaded {len(got)} {name} test questions from Hugging Face")
       items.extend(got)
   if not items:
     raise SystemExit("No questions to evaluate.")
   if args.limit:
     items = items[: args.limit]
+  if args.export:
+    with open(args.export, "w", encoding="utf-8") as f:
+      json.dump(items, f, indent=2, ensure_ascii=False)
+    print(f"Saved {len(items)} questions to {args.export}. Use it with: --data {args.export}")
+    return
+
   prompts = [PROMPT_TEMPLATE.format(problem=it["problem"].strip()) for it in items]
 
   gold_counts = Counter(normalize(it["ground_truth"]) for it in items)
