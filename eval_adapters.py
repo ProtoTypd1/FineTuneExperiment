@@ -42,6 +42,11 @@ LLM judge (optional, same idea as generate_trajectories.py):
   (results saved from now on include the problem text, which the judge needs.)
 
 Speed options:
+  --procs N         run N copies of the eval in parallel on the same GPU (each on its own CPU
+                    core) and merge the results. Decoding is bottlenecked by ONE Python thread
+                    launching GPU work, so on a many-core CPU with weak single-core speed this
+                    keeps the GPU busier. Try 3-4. VRAM per process is about 2 GB of weights plus
+                    its KV cache (--batch-size defaults to 16 per process).
   --merge           merge each adapter into the base weights and run it alone, at plain-model
                     speed (no LoRA overhead per layer). Adapters are processed one at a time.
                     Merging in bf16/fp16 rounds weights slightly, so scores can differ by a
@@ -74,7 +79,9 @@ import argparse
 import json
 import os
 import re
+import subprocess
 import sys
+import tempfile
 import time
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -662,9 +669,10 @@ class FinalAnswerStop(StoppingCriteria):
   Checked every few steps to keep CPU overhead low; rows already finished stay finished.
   """
 
-  def __init__(self, tokenizer, prompt_len, every=4, window=48):
+  def __init__(self, tokenizer, prompt_len, every=16, window=48):
     self.tokenizer, self.prompt_len, self.every, self.window = tokenizer, prompt_len, every, window
     self.step = 0
+    self.finished = set()
 
   def __call__(self, input_ids, scores, **kwargs):
     self.step += 1
@@ -672,10 +680,14 @@ class FinalAnswerStop(StoppingCriteria):
     if self.step % self.every:
       return done
     start = max(self.prompt_len, input_ids.shape[1] - self.window)
-    tails = self.tokenizer.batch_decode(input_ids[:, start:], skip_special_tokens=True)
-    for r, tail in enumerate(tails):
+    rows = [r for r in range(input_ids.shape[0]) if r not in self.finished]
+    if not rows:
+      return done
+    tails = self.tokenizer.batch_decode(input_ids[rows, start:], skip_special_tokens=True)
+    for r, tail in zip(rows, tails):
       if FINAL_DONE_RE.search(tail):
         done[r] = True
+        self.finished.add(r)
     return done
 
 
@@ -689,13 +701,15 @@ class LoopStop(StoppingCriteria):
 
   A row is looping when its last LOOP_NGRAM tokens already appeared at least LOOP_REPEATS
   times in what it has generated so far (e.g. 'Let's use calculator.' over and over).
-  Works on token ids, is checked every few steps, and ignores rows that already finished
+  Works on token ids, looks only at the last `window` (256) tokens so loops up to ~80 tokens
+  long are caught, is checked every 16 steps, and ignores rows that already finished
   (their tail is padding). self.looped[row] records which rows were cut off.
   """
 
-  def __init__(self, prompt_len, n_rows, finished_ids, ngram, repeats, every=8, min_tokens=64):
+  def __init__(self, prompt_len, n_rows, finished_ids, ngram, repeats, every=16, min_tokens=64, window=256):
     self.prompt_len, self.finished_ids = prompt_len, set(finished_ids)
     self.ngram, self.repeats, self.every, self.min_tokens = ngram, repeats, every, min_tokens
+    self.window = window
     self.looped = [False] * n_rows
     self.step = 0
 
@@ -704,9 +718,12 @@ class LoopStop(StoppingCriteria):
     done = torch.zeros(input_ids.shape[0], dtype=torch.bool, device=input_ids.device)
     if self.step % self.every:
       return done
+    if input_ids.shape[1] - self.prompt_len < self.min_tokens:
+      return done
     n = self.ngram
-    for r, toks in enumerate(input_ids[:, self.prompt_len:].tolist()):
-      if len(toks) < self.min_tokens or toks[-1] in self.finished_ids:
+    start = max(self.prompt_len, input_ids.shape[1] - self.window)
+    for r, toks in enumerate(input_ids[:, start:].tolist()):
+      if self.looped[r] or toks[-1] in self.finished_ids:
         continue
       tail = toks[-n:]
       first, count = tail[0], 0
@@ -760,6 +777,80 @@ def parse_adapter_arg(arg):
   return arg, 1500
 
 
+def finalize(all_results, args):
+  """Sort, judge, report, save. Shared by the single-process and --procs paths."""
+  for rs in all_results.values():
+    rs.sort(key=lambda r: r["index"])
+  cfg = make_judge_cfg(args)
+  if cfg:
+    run_judge(all_results, cfg)
+  report(all_results)
+  if args.save:
+    with open(args.save, "w", encoding="utf-8") as f:
+      json.dump(all_results, f, indent=2, ensure_ascii=False)
+    print(f"\nSaved generations to {args.save}")
+
+
+def run_sharded(args, items):
+  """Run N copies of this script, each on every Nth question, and merge their results.
+
+  Decoding is limited by ONE Python thread launching GPU work, so extra processes (each on
+  its own CPU core) keep the GPU busier. Results are identical to a single-process run.
+  """
+  n = args.procs
+  workdir = tempfile.mkdtemp(prefix="eval_shards_")
+  tagged = [dict(it, _idx=j) for j, it in enumerate(items)]  # remember each question's global position
+  batch = args.batch_size or 16  # per process: total VRAM is roughly procs x (2 GB weights + KV cache)
+
+  env = dict(os.environ, OMP_NUM_THREADS="1", MKL_NUM_THREADS="1", TOKENIZERS_PARALLELISM="false")
+  procs = []
+  for k in range(n):
+    shard = tagged[k::n]
+    if not shard:
+      continue
+    data_path = os.path.join(workdir, f"questions_{k}.json")
+    out_path = os.path.join(workdir, f"results_{k}.json")
+    log_path = os.path.join(workdir, f"log_{k}.txt")
+    with open(data_path, "w", encoding="utf-8") as f:
+      json.dump(shard, f, ensure_ascii=False)
+    cmd = [sys.executable, os.path.abspath(__file__), *args.adapters,
+           "--data", data_path, "--child-out", out_path, "--batch-size", str(batch),
+           "--loop-ngram", str(args.loop_ngram), "--loop-repeats", str(args.loop_repeats)]
+    for flag, on in (("--sequential", args.sequential), ("--merge", args.merge),
+                     ("--no-early-stop", args.no_early_stop), ("--no-loop-stop", args.no_loop_stop)):
+      if on:
+        cmd.append(flag)
+    log = open(log_path, "w")
+    procs.append((k, len(shard), subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT, env=env),
+                  out_path, log_path, log))
+    print(f"  process {k}: {len(shard)} questions  (log: {log_path})")
+
+  t0 = time.time()
+  while any(p.poll() is None for _, _, p, *_ in procs):
+    finished = sum(p.poll() is not None for _, _, p, *_ in procs)
+    print(f"  {finished}/{len(procs)} processes finished, {time.time() - t0:.0f}s elapsed", end="\r")
+    time.sleep(3)
+  print()
+
+  merged, failed = {}, False
+  for k, size, p, out_path, log_path, log in procs:
+    log.close()
+    if p.returncode != 0 or not os.path.isfile(out_path):
+      failed = True
+      print(f"\nProcess {k} failed (exit {p.returncode}). Last lines of {log_path}:")
+      with open(log_path, "r", encoding="utf-8", errors="replace") as f:
+        print("".join(f.readlines()[-15:]))
+      continue
+    with open(out_path, "r", encoding="utf-8") as f:
+      for label, rs in json.load(f).items():
+        merged.setdefault(label, []).extend(rs)
+  if failed:
+    raise SystemExit("One or more processes failed; see the messages above (try a smaller --batch-size "
+                     "or fewer --procs if it was out of memory).")
+  print(f"Generation took {time.time() - t0:.0f}s across {len(procs)} processes")
+  return merged
+
+
 def main():
   ap = argparse.ArgumentParser(description=__doc__,
                                formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -782,6 +873,11 @@ def main():
                   help="Save the sampled questions to this JSON file and exit (no model needed). "
                        "Reuse later with --data FILE for a fully offline run.")
   ap.add_argument("adapters", nargs="*", help="path or path:max_new_tokens")
+  ap.add_argument("--procs", type=int, default=1,
+                  help="Run this many copies of the evaluation in parallel on the same GPU, each on its "
+                       "own CPU core, and merge the results (default 1). Each loads its own copy of the "
+                       "model: roughly 2 GB + KV cache per process.")
+  ap.add_argument("--child-out", default=None, help=argparse.SUPPRESS)
   ap.add_argument("--sequential", action="store_true")
   ap.add_argument("--merge", action="store_true",
                   help="Merge each adapter into the base weights and run adapters one at a time (faster per token).")
@@ -866,6 +962,11 @@ def main():
   majority = gold_counts.most_common(1)[0][1] / len(items)
   print(f"{len(items)} held-out questions. Always guessing the most common answer: {majority:.0%}")
 
+  if args.procs > 1 and not args.child_out:
+    print(f"\nRunning {args.procs} processes in parallel on one GPU")
+    finalize(run_sharded(args, items), args)
+    return
+
   tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL_ID)
   tokenizer.pad_token = "<|padding|>"
   tokenizer.padding_side = "left"  # required for batched generation with a decoder-only model
@@ -894,7 +995,7 @@ def main():
 
   def make_result(j, text, n_tok, looped=False):
     r = {
-        "index": j,
+        "index": items[j].get("_idx", j),
         "domain": items[j].get("domain", "all"),
         "problem": items[j]["problem"].strip(),
         "gold": items[j]["ground_truth"],
@@ -959,17 +1060,11 @@ def main():
     print()
   print(f"Generation took {time.time() - t0:.0f}s")
 
-  for path in all_results:
-    all_results[path].sort(key=lambda r: r["index"])
-  judge_cfg = make_judge_cfg(args)
-  if judge_cfg:
-    run_judge(all_results, judge_cfg)
-  report(all_results)
-
-  if args.save:
-    with open(args.save, "w", encoding="utf-8") as f:
-      json.dump(all_results, f, indent=2, ensure_ascii=False)
-    print(f"\nSaved generations to {args.save}")
+  if args.child_out:  # worker process: hand raw results to the parent, which judges and reports
+    with open(args.child_out, "w", encoding="utf-8") as f:
+      json.dump(all_results, f, ensure_ascii=False)
+    return
+  finalize(all_results, args)
 
 
 if __name__ == "__main__":
