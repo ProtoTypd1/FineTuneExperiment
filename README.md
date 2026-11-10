@@ -47,11 +47,9 @@ Each adapter is run on 100 questions from each of the 11 domains (1,100 question
 ### Scoring
 
 1. **Mechanical match first:** exact, numeric, and LaTeX-aware comparison of the predicted answer against the gold answer. This settles most records.
-2. **Manual review for the rest:** 256 of the 3,300 answers (7.8%) could not be settled mechanically (108 hotpot, 49 numina_pro, 42 math, 36 deepmath, 21 others). Each was reviewed individually by Claude, reading the problem, the gold answer, and the prediction. Result: 5 correct, 2 borderline (counted as incorrect), 249 incorrect. These are AI reviews, not human ones; the per-record verdicts are in `results_final.json` (fields `review` and `review_note`).
+2. **Manual review for the rest:** 256 of the 3,300 answers (7.8%) could not be settled mechanically (108 hotpot, 49 numina_pro, 42 math, 36 deepmath, 21 others). Each was reviewed individually by Claude. Result: 5 correct, 2 borderline (counted as incorrect), 249 incorrect. Do keep in mind: these are AI reviews, not human ones.
 
-An LLM-judge pass was tried first and discarded. It accepted 19 of the 256 answers; the manual review agreed with only 3 of them. It accepted bare letters or truncated text as answers (for example `N` for `625`, `X` for `20`, and `A` for `Rhombus`), so its verdicts are not used anywhere in this README.
-
-Files: `results.json` (raw generations), `results_final.json` (same records with final verdicts).
+Files: `results.json` (raw generations), `results_final.json` (Claude Reviewed file).
 
 ## Results
 
@@ -62,8 +60,7 @@ Files: `results.json` (raw generations), `results_final.json` (same records with
 | `adapter_nonreasoning` | 0.1% | 1/1100 | 1083 | 343 | 969 | 115/1100 |
 | *Most-common-answer baseline* | *20.4%* | *224/1100* | | | | |
 
-"Looped" is the eval script's repetition flag. TODO: document its exact definition here. Looped generations are cut short rather than run to the cap: their median length is 208 tokens (reasoning) and 272 tokens (nonreasoning), and none reached 700.
-
+Looped generations are generations that generate the same tokens over and over again. These are generally detected and cut short by the inference script instead of generating until the token limit.
 The baseline always guesses the most frequent gold answer for that domain in the eval set.
 
 ### Correct answers by domain (out of 100)
@@ -88,10 +85,10 @@ The baseline always guesses the most frequent gold answer for that domain in the
 - **No adapter beat the most-common-answer baseline overall** (20.4%). `adapter_answer` came closest at 17.4%. It was above baseline in only three domains: arc (34 vs 31), math (8 vs 6) and hotpot (14 vs 4).
 - **Answer-only:** it wrote `FINAL ANSWER: X` and stopped on all 1,100 questions, at about 9 tokens each, but its predictions collapse onto one or two options. On ARC it only ever predicted `A` (70) or `C` (30). The same pattern holds for mmlu (`A` 76, `C` 24), logiqa (`A` 69, `C` 30, one `B`), commonsense (`A` 69 of 100) and logic_mcq (`A` 68 of 100). On strategyqa it said "no" 99 times. On open-ended math it often returned a stray letter (`N`, `X`, `A`) instead of an answer.
 - **Both reasoning adapters almost never reached an answer.** `adapter_reasoning` opened with a `<think>` block on 1,100/1,100 questions and `adapter_nonreasoning` opened with `GIVENS:` on 1,100/1,100, but only 102 (reasoning) and 17 (nonreasoning) generations wrote a `FINAL ANSWER` line at all.
-- **Looping:** 911/1100 (reasoning) and 969/1100 (nonreasoning) generations were flagged as loops, typically repeating a phrase such as "Let's use scratchpad.note." over and over. Of the generations that did not loop, 115 nonreasoning generations ran to the 700-token cap instead.
+- **Looping:** 911/1100 (reasoning) and 969/1100 (nonreasoning) generations were flagged as loops, typically repeating a phrase over and over. Of the generations that did not loop, 115 nonreasoning generations ran to the 700-token cap instead.
 - **When the reasoning adapter finished, it was right about a quarter of the time:** 26 of its 102 generations with a `FINAL ANSWER` line were correct, and 19 of those 26 were strategyqa.
 - **Content was not learned:** both adapters reproduced the format of the training data (`<think>` blocks, the `GIVENS:` section) without producing working reasoning.
 
 ### Conclusion
 
-This is by no means a conclusive test. Fine tuning should have taken place with a much larger dataset and evaluated with more diverse answers. However, on such a small scale, it appears that reasoning must either be in much larger amounts, or doesnt help at all. Across 1,100 questions in 11 domains, none of the three adapters beat simply guessing the most common answer.
+This is by no means a conclusive test. Fine tuning should have taken place with a much larger dataset. However, on such a small scale, it appears that reasoning must either be in much larger amounts, or doesn't help at all. Across 1,100 questions in 11 domains, none of the three adapters beat simply guessing the most common answer.
