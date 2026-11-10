@@ -1,5 +1,7 @@
 # Fine-tuning a small model
 
+DISCLAIMER: This was made using the help of Claude.
+
 An experiment on LoRA fine-tuning of a small model (Pythia-1B, `EleutherAI/pythia-1b-deduped`) on agentic trajectories, comparing training targets with and without reasoning.
 
 All data was prepared using this command, training on only correct answers.
