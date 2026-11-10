@@ -1,4 +1,4 @@
-# Fine-tuning a small model to work in a harness
+# Fine-tuning a small model
 
 An experiment on LoRA fine-tuning of a small model (Pythia-1B, `EleutherAI/pythia-1b-deduped`) on agentic trajectories, comparing training targets with and without reasoning.
 
