@@ -1,0 +1,38 @@
+FILE                                                  READ  KEPT  SKIPPED
+trajectories_verified_qwen36-ud-q4_k_xl_math.jsonl       1     1  -
+trajectories_verified_Qwen3_6-35B-A3B-Uncensored-HauhauCS-Aggressive-Q4_K_P_deepmath.jsonl    39    19  {'tool_noise': 20}
+trajectories_verified_Qwen3_6-35B-A3B-Uncensored-HauhauCS-Aggressive-Q4_K_P_hotpot.jsonl    45    30  {'tool_noise': 15}
+trajectories_verified_Qwen3_6-35B-A3B-Uncensored-HauhauCS-Aggressive-Q4_K_P_math.jsonl    46    41  {'tool_noise': 4, 'rolled_over': 1}
+trajectories_verified_Qwen3_6-35B-A3B-Uncensored-HauhauCS-Aggressive-Q4_K_P_numina_pro.jsonl     6     3  {'tool_noise': 3}
+trajectories_verified_Qwen3_6-35B-A3B-Uncensored-HauhauCS-Aggressive-Q4_K_P_skywork_math.jsonl    36    25  {'tool_noise': 11}
+trajectories_verified_Qwen3_6-35B-A3B-Uncensored-HauhauCS-Aggressive-Q4_K_P_webinstruct.jsonl    44    34  {'tool_noise': 10}
+trajectories_verified_swift-1_5-iq2_xs_logic_mcq.jsonl     1     0  {'tool_noise': 1}
+trajectories_verified_swift-1_5-iq3_s_arc.jsonl         67    61  {'tool_noise': 6}
+trajectories_verified_swift-1_5-iq3_s_commonsense.jsonl    58    57  {'tool_noise': 1}
+trajectories_verified_swift-1_5-iq3_s_deepmath.jsonl    35     9  {'tool_noise': 26}
+trajectories_verified_swift-1_5-iq3_s_gsm8k.jsonl       54    54  -
+trajectories_verified_swift-1_5-iq3_s_hotpot.jsonl      26    23  {'tool_noise': 3}
+trajectories_verified_swift-1_5-iq3_s_knights_knaves.jsonl    66     0  {'tool_noise': 66}
+trajectories_verified_swift-1_5-iq3_s_logic_mcq.jsonl    57    19  {'tool_noise': 38}
+trajectories_verified_swift-1_5-iq3_s_logiqa.jsonl      50    31  {'tool_noise': 19}
+trajectories_verified_swift-1_5-iq3_s_math.jsonl        33    20  {'tool_noise': 13}
+trajectories_verified_swift-1_5-iq3_s_mmlu.jsonl        56    44  {'tool_noise': 12}
+trajectories_verified_swift-1_5-iq3_s_numina_pro.jsonl    11     3  {'tool_noise': 8}
+trajectories_verified_swift-1_5-iq3_s_strategyqa.jsonl    51    36  {'tool_noise': 15}
+trajectories_verified_unsloth_Qwen3_6-35B-A3B-MTP-GGUF_arc.jsonl   550   545  {'tool_noise': 5}
+trajectories_verified_unsloth_Qwen3_6-35B-A3B-MTP-GGUF_commonsense.jsonl   494   494  -
+trajectories_verified_unsloth_Qwen3_6-35B-A3B-MTP-GGUF_deepmath.jsonl   153    80  {'tool_noise': 73}
+trajectories_verified_unsloth_Qwen3_6-35B-A3B-MTP-GGUF_gsm8k.jsonl   375   373  {'tool_noise': 2}
+trajectories_verified_unsloth_Qwen3_6-35B-A3B-MTP-GGUF_hotpot.jsonl   175   138  {'tool_noise': 37}
+trajectories_verified_unsloth_Qwen3_6-35B-A3B-MTP-GGUF_knights_knaves.jsonl   637   594  {'tool_noise': 43}
+trajectories_verified_unsloth_Qwen3_6-35B-A3B-MTP-GGUF_logic_mcq.jsonl   450   422  {'tool_noise': 28}
+trajectories_verified_unsloth_Qwen3_6-35B-A3B-MTP-GGUF_logiqa.jsonl   444   443  {'tool_noise': 1}
+trajectories_verified_unsloth_Qwen3_6-35B-A3B-MTP-GGUF_math.jsonl   249   203  {'tool_noise': 46}
+trajectories_verified_unsloth_Qwen3_6-35B-A3B-MTP-GGUF_mmlu.jsonl   512   494  {'tool_noise': 18}
+trajectories_verified_unsloth_Qwen3_6-35B-A3B-MTP-GGUF_numina_pro.jsonl    90    30  {'tool_noise': 59, 'rolled_over': 1}
+trajectories_verified_unsloth_Qwen3_6-35B-A3B-MTP-GGUF_open_rl.jsonl     5     5  -
+trajectories_verified_unsloth_Qwen3_6-35B-A3B-MTP-GGUF_skywork_math.jsonl   152   102  {'tool_noise': 50}
+trajectories_verified_unsloth_Qwen3_6-35B-A3B-MTP-GGUF_strategyqa.jsonl   349   313  {'tool_noise': 36}
+trajectories_verified_unsloth_Qwen3_6-35B-A3B-MTP-GGUF_webinstruct.jsonl   203   146  {'tool_noise': 57}
+TOTAL                                                 5620  4399
+domains: {'math': 238, 'deepmath': 97, 'hotpot': 171, 'numina_pro': 32, 'skywork_math': 114, 'webinstruct': 162, 'arc': 548, 'commonsense': 499, 'gsm8k': 382, 'logic_mcq': 398, 'logiqa': 424, 'mmlu': 481, 'strategyqa': 313, 'knights_knaves': 535, 'open_rl': 5}

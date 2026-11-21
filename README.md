@@ -26,22 +26,26 @@ python train_lora.py data_answer.json ./adapter_answer
 
 ### Dataset domains
 
-The same 11 domains are used for training and for evaluation.
+The same domains are used for training and for evaluation.
 
 | Domain | Source dataset | Task | Train samples | Eval questions |
 |---|---|---|---:|---:|
-| arc | `allenai/ai2_arc` (Challenge) | Science reasoning, multiple choice | 61 | 100 |
-| commonsense | `tau/commonsense_qa` | Commonsense reasoning, multiple choice | 57 | 100 |
-| gsm8k | `openai/gsm8k` | Grade-school word problems | 54 | 100 |
-| mmlu | `cais/mmlu` | Broad knowledge, multiple choice | 44 | 100 |
-| strategyqa | `ChilleD/StrategyQA` | Multi-step yes/no reasoning | 36 | 100 |
-| logiqa | `lucasmccabe/logiqa` | Logical reasoning reading comprehension | 31 | 100 |
-| hotpot | `hotpotqa/hotpot_qa` | Multi-hop question answering | 23 | 100 |
-| math | `AI-MO/NuminaMath-CoT` | Competition-style math | 20 | 100 |
-| logic_mcq | `hivaze/LOGIC-701` (en) | Logic puzzles, multiple choice | 19 | 100 |
-| deepmath | `zwhe99/DeepMath-103K` | Hard math, answer match | 9 | 100 |
-| numina_pro | `Azure99/NuminaMath-1.5-Pro` | Hard-flagged math, answer match | 3 | 100 |
-| **Total** | | | **357** | **1,100** |
+| arc | `allenai/ai2_arc` (Challenge) | Science reasoning, multiple choice | 548 | 100 |
+| knights_knaves | `K-and-K/knights-and-knaves` | Knights & knaves deduction (2-5 people) | 535 | – |
+| commonsense | `tau/commonsense_qa` | Commonsense reasoning, multiple choice | 499 | 100 |
+| mmlu | `cais/mmlu` | Broad knowledge, multiple choice | 481 | 100 |
+| logiqa | `lucasmccabe/logiqa` | Logical reasoning reading comprehension | 424 | 100 |
+| logic_mcq | `hivaze/LOGIC-701` (en) | Logic puzzles, multiple choice | 398 | 100 |
+| gsm8k | `openai/gsm8k` | Grade-school word problems | 382 | 100 |
+| strategyqa | `ChilleD/StrategyQA` | Multi-step yes/no reasoning | 313 | 100 |
+| math | `AI-MO/NuminaMath-CoT` | Competition-style math | 238 | 100 |
+| hotpot | `hotpotqa/hotpot_qa` | Multi-hop question answering | 171 | 100 |
+| webinstruct | `TIGER-Lab/WebInstruct-verified` | University/PhD science and general knowledge | 162 | – |
+| skywork_math | `Skywork/Skywork-OR1-RL-Data` (math) | Math, answer match | 114 | – |
+| deepmath | `zwhe99/DeepMath-103K` | Hard math, answer match | 97 | 100 |
+| numina_pro | `Azure99/NuminaMath-1.5-Pro` | Hard-flagged math, answer match | 32 | 100 |
+| open_rl | `TuringEnterprises/Open-RL` | PhD-level STEM problems | 5 | – |
+| **Total** | | | **4,399** | **1,100** |
 
 ## Evaluation
 
