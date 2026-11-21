@@ -31,7 +31,7 @@ The same domains are used for training and for evaluation.
 | Domain | Source dataset | Task | Train samples | Eval questions |
 |---|---|---|---:|---:|
 | arc | `allenai/ai2_arc` (Challenge) | Science reasoning, multiple choice | 548 | 100 |
-| knights_knaves | `K-and-K/knights-and-knaves` | Knights & knaves deduction (2-5 people) | 535 | – |
+| knights_knaves | `K-and-K/knights-and-knaves` | Knights & knaves deduction (2-5 people) | 535 | 100 |
 | commonsense | `tau/commonsense_qa` | Commonsense reasoning, multiple choice | 499 | 100 |
 | mmlu | `cais/mmlu` | Broad knowledge, multiple choice | 481 | 100 |
 | logiqa | `lucasmccabe/logiqa` | Logical reasoning reading comprehension | 424 | 100 |
@@ -40,12 +40,12 @@ The same domains are used for training and for evaluation.
 | strategyqa | `ChilleD/StrategyQA` | Multi-step yes/no reasoning | 313 | 100 |
 | math | `AI-MO/NuminaMath-CoT` | Competition-style math | 238 | 100 |
 | hotpot | `hotpotqa/hotpot_qa` | Multi-hop question answering | 171 | 100 |
-| webinstruct | `TIGER-Lab/WebInstruct-verified` | University/PhD science and general knowledge | 162 | – |
-| skywork_math | `Skywork/Skywork-OR1-RL-Data` (math) | Math, answer match | 114 | – |
+| webinstruct | `TIGER-Lab/WebInstruct-verified` | University/PhD science and general knowledge | 162 | 100 |
+| skywork_math | `Skywork/Skywork-OR1-RL-Data` (math) | Math, answer match | 114 | 100 |
 | deepmath | `zwhe99/DeepMath-103K` | Hard math, answer match | 97 | 100 |
 | numina_pro | `Azure99/NuminaMath-1.5-Pro` | Hard-flagged math, answer match | 32 | 100 |
-| open_rl | `TuringEnterprises/Open-RL` | PhD-level STEM problems | 5 | – |
-| **Total** | | | **4,399** | **1,100** |
+| open_rl | `TuringEnterprises/Open-RL` | PhD-level STEM problems | 5 | 100 |
+| **Total** | | | **4,399** | **1,500** |
 
 ## Evaluation
 
@@ -53,7 +53,7 @@ The same domains are used for training and for evaluation.
 python eval_adapters.py ./adapter_answer:24 ./adapter_reasoning:700 ./adapter_nonreasoning:700 --save results.json
 ```
 
-Each adapter is run on 100 questions from each of the 11 domains (1,100 questions per adapter). Every generation is saved to `results.json`. The number after each adapter is its max new tokens (24 for answer-only, 700 for the reasoning adapters).
+Each adapter is run on 100 questions from each of the 15 domains (1,500 questions per adapter). Every generation is saved to `results.json`. The number after each adapter is its max new tokens (24 for answer-only, 700 for the reasoning adapters).
 
 > TODO: note any dataset-selection flags used for the 11-domain run, and confirm that the evaluation questions in every domain come from held-out splits rather than the training data.
 
@@ -71,7 +71,7 @@ Files: `results.json` (raw generations), `results_final.json` (Claude Reviewed f
 | `adapter_answer` | 17.4% | 191/1100 | 0 | 9 | 0 | 13/1100 |
 | `adapter_reasoning` | 2.4% | 26/1100 | 998 | 282 | 911 | 90/1100 |
 | `adapter_nonreasoning` | 0.1% | 1/1100 | 1083 | 343 | 969 | 115/1100 |
-| *Most-common-answer baseline* | *20.4%* | *224/1100* | | | | |
+| *Most-common-answer baseline* | *20.4%* | *224/1500* | | | | |
 
 Looped generations are generations that generate the same tokens over and over again. These are generally detected and cut short by the inference script instead of generating until the token limit.
 The baseline always guesses the most frequent gold answer for that domain in the eval set.
