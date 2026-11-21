@@ -17,6 +17,13 @@ python prepare_data.py <directory> --out data --verified-only
 | `adapter_nonreasoning` | `data_cot.json` | Visible written reasoning, then `FINAL ANSWER: X` | `python train_lora.py data_cot.json ./adapter_nonreasoning` |
 | `adapter_reasoning` | `data_think.json` | `<think>` reasoning blocks plus the visible reasoning, then `FINAL ANSWER: X` | `python train_lora.py data_think.json ./adapter_reasoning` |
 
+The LORA adapters were trained using these commands
+```
+python train_lora.py data_cot.json   ./adapter_nonreasoning
+python train_lora.py data_think.json ./adapter_reasoning
+python train_lora.py data_answer.json ./adapter_answer
+```
+
 ### Dataset domains
 
 The same 11 domains are used for training and for evaluation.
