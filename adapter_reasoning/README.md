@@ -38,11 +38,11 @@ This model was trained with SFT.
 
 ### Framework versions
 
-- PEFT 0.21.2
-- TRL: 1.17.1
+- PEFT 0.22.0
+- TRL: 1.18.2
 - Transformers: 5.22.2
-- Pytorch: 2.15.0
-- Datasets: 5.1.0
+- Pytorch: 2.15.0+cu132
+- Datasets: 5.2.0
 - Tokenizers: 0.23.3
 
 ## Citations
@@ -54,7 +54,7 @@ Cite TRL as:
 ```bibtex
 @software{vonwerra2020trl,
   title   = {{TRL: Transformers Reinforcement Learning}},
-  author  = {von Werra, Leandro and Belkada, Younes and Tunstall, Lewis and Beeching, Edward and Thrush, Tristan and Lambert, Nathan and Huang, Shengyi and Rasul, Kashif and Gallouédec, Quentin},
+  author  = {von Werra, Leandro and Belkada, Younes and Tunstall, Lewis and Beeching, Edward and Thrush, Tristan and Lambert, Nathan and Huang, Shengyi and Rasul, Kashif and Gallouédec, Quentin and Dirhoussi, Amine},
   license = {Apache-2.0},
   url     = {https://github.com/huggingface/trl},
   year    = {2020}
