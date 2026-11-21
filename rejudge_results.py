@@ -19,6 +19,15 @@ Without it those cases are sent to the LLM judge instead of being settled for fr
 The judge is any OpenAI-compatible server (llama.cpp, vLLM, ...); it is called over
 plain HTTP, so the openai package is not needed.
 
+THINKING: the judge is allowed to think, but only up to --judge-think-tokens (default 1000)
+reasoning tokens. Each call is sent with thinking on and a hard max_tokens of that budget
+plus a small allowance for the YES/NO itself. If the reasoning hits the cap before a verdict,
+the judge is asked once more -- thinking off, shown its own partial reasoning -- to answer
+YES or NO now. Those records get method "llm_judge_forced" so you can tell them apart
+(--judge-no-force leaves them unjudged instead). --judge-think-tokens 0 turns thinking off.
+Some servers can also enforce the budget themselves; pass their parameter with
+--judge-extra-body, e.g. '{"thinking_budget_tokens": 1000}' (the hard cap applies regardless).
+
 Input is never modified. Output goes to --out (default results_rejudged.json);
 if --out already exists it is used as the starting point, so an interrupted run
 resumes instead of starting over. Each changed record keeps "original_method".
@@ -34,6 +43,10 @@ USAGE:
     # a few judge calls at once, if your server can handle it
     python rejudge_results.py --results results.json --judge-port 8081 \\
         --judge-model-label <name> --workers 4
+
+    # allow more or less thinking (default 1000 reasoning tokens; 0 = thinking off)
+    python rejudge_results.py --results results.json --judge-port 8081 \\
+        --judge-model-label <name> --judge-think-tokens 2000
 """
 
 import argparse
@@ -52,7 +65,11 @@ except ImportError:          # optional -- see docstring
     sympy = None
 
 JUDGE_TIMEOUT = 900          # seconds per judge call (--judge-timeout)
-JUDGE_MAX_TOKENS = 16000     # cap on the judge's reply (--judge-max-tokens)
+JUDGE_THINK_TOKENS = 1000    # cap on the judge's reasoning (--judge-think-tokens; 0 = thinking off)
+JUDGE_ANSWER_RESERVE = 48    # extra tokens allowed after the reasoning, for the YES/NO itself
+FORCED_ANSWER_TOKENS = 32    # budget for the "answer now" follow-up when the reasoning hit its cap
+JUDGE_NO_THINK_MAX_TOKENS = 16000   # reply cap when thinking is off (a server that ignores the
+                                    # setting may still think, so this stays generous)
 
 JUDGE_PROMPT_TEMPLATE = (
     "Problem: {problem}\n\n"
@@ -223,45 +240,88 @@ def build_base_url(host, port):
 # (same request the openai client would send; no retries, so one timeout = one failure)
 # ---------------------------------------------------------------------------
 
-def judge_request(base_url, api_key, model, prompt, timeout, max_tokens):
-    """Returns (reply_text, finish_reason). Raises on HTTP/network errors."""
-    body = json.dumps({
+def judge_request(base_url, api_key, model, prompt, timeout, max_tokens, thinking, extra_body=None):
+    """Returns (reply_text, reasoning_text, finish_reason). Raises on HTTP/network errors.
+    reasoning_text is the server's separate reasoning field (reasoning_content / reasoning)
+    when it splits reasoning out of the reply, else ''."""
+    payload = {
         "model": model,
         "messages": [{"role": "user", "content": prompt}],
         "temperature": 0,
-        "max_tokens": max_tokens,
-        # thinking off: a one-word verdict doesn't need a reasoning chain. Servers that
-        # don't support the option ignore it.
-        "chat_template_kwargs": {"enable_thinking": False},
-    }).encode("utf-8")
+        "max_tokens": max_tokens,    # counts reasoning AND answer, so this is the hard cap on thinking
+        "chat_template_kwargs": {"enable_thinking": bool(thinking)},
+    }
+    if extra_body:
+        payload.update(extra_body)
+    body = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(
         base_url + "/chat/completions", data=body, method="POST",
         headers={"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"})
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         data = json.loads(resp.read().decode("utf-8"))
     choice = data["choices"][0]
-    return (choice.get("message") or {}).get("content") or "", choice.get("finish_reason")
+    msg = choice.get("message") or {}
+    return (msg.get("content") or "",
+            msg.get("reasoning_content") or msg.get("reasoning") or "",
+            choice.get("finish_reason"))
+
+
+def partial_reasoning(text, reasoning):
+    """What the judge had thought so far: the server's separate reasoning field if there is
+    one, otherwise whatever sits inside an unclosed <think> block in the reply."""
+    if reasoning.strip():
+        return reasoning.strip()
+    m = re.search(r"<think>(.*)", text, flags=re.DOTALL | re.IGNORECASE)
+    return m.group(1).replace("</think>", "").strip() if m else ""
 
 
 def llm_judge_match(generated, ground_truth, problem_text, judge, judge_model):
-    """True / False, or None when there's no usable verdict (call failed, timed out,
-    or the reply had no YES/NO) so the record stays unjudged instead of silently wrong.
-    `judge` is {"base_url", "api_key", "timeout", "max_tokens"}."""
+    """Returns (verdict, forced). verdict is True / False, or None when there's no usable
+    verdict (call failed, timed out, or the reply had no YES/NO) so the record stays
+    unjudged instead of silently wrong. forced is True when the reasoning hit its token cap
+    and the verdict came from the follow-up "answer now" call.
+    `judge` is {"base_url", "api_key", "timeout", "think_tokens", "force", "extra_body"}."""
     prompt = JUDGE_PROMPT_TEMPLATE.format(
         problem=problem_text, ground_truth=ground_truth, candidate=generated)
+    think = judge["think_tokens"]
+    thinking = think > 0
+    max_tokens = think + JUDGE_ANSWER_RESERVE if thinking else JUDGE_NO_THINK_MAX_TOKENS
     try:
-        text, finish = judge_request(judge["base_url"], judge["api_key"], judge_model, prompt,
-                                     judge["timeout"], judge["max_tokens"])
+        text, reasoning, finish = judge_request(
+            judge["base_url"], judge["api_key"], judge_model, prompt,
+            judge["timeout"], max_tokens, thinking, judge.get("extra_body"))
         verdict = parse_judge_verdict(text)
-        if verdict is None:
-            why = ("ran out of tokens before answering -- raise --judge-max-tokens"
-                   if finish == "length" else "reply had no YES/NO in it")
-            print(f"    (judge gave no usable verdict: {why} -- leaving this answer unjudged)")
-        return verdict
+        if verdict is not None:
+            return verdict, False
+
+        if thinking and finish == "length" and judge.get("force", True):
+            # Reasoning used up its budget without answering: close it off and ask for the verdict.
+            thoughts = partial_reasoning(text, reasoning)
+            follow_up = (prompt
+                         + (f"\n\nYour reasoning so far (cut off at the length limit):\n{thoughts}"
+                            if thoughts else "")
+                         + "\n\nStop reasoning now. Respond with exactly one word: YES or NO.")
+            text2, _, _ = judge_request(
+                judge["base_url"], judge["api_key"], judge_model, follow_up,
+                judge["timeout"], FORCED_ANSWER_TOKENS, False, judge.get("extra_body"))
+            verdict = parse_judge_verdict(text2)
+            if verdict is not None:
+                return verdict, True
+            print("    (reasoning hit its cap and the judge still gave no YES/NO -- "
+                  "leaving this answer unjudged)")
+            return None, False
+
+        if finish == "length":
+            why = (f"reasoning hit the {think}-token cap and --judge-no-force is set"
+                   if thinking else "ran out of tokens before answering")
+        else:
+            why = "reply had no YES/NO in it"
+        print(f"    (judge gave no usable verdict: {why} -- leaving this answer unjudged)")
+        return None, False
     except Exception as e:
         hint = " -- try a larger --judge-timeout" if "timed out" in str(e).lower() else ""
         print(f"    (judge call failed: {e}{hint} -- leaving this answer unjudged)")
-        return None
+        return None, False
 
 
 # ---------------------------------------------------------------------------
@@ -291,7 +351,8 @@ def judge_one(rec, judge, judge_label):
         return mech, ("mechanical" if mech else "mechanical_mismatch")
     if judge is None:
         return None, "needs_judge"
-    return llm_judge_match(rec["pred"], rec["gold"], rec["problem"], judge, judge_label), "llm_judge"
+    verdict, forced = llm_judge_match(rec["pred"], rec["gold"], rec["problem"], judge, judge_label)
+    return verdict, ("llm_judge_forced" if forced else "llm_judge")
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -303,13 +364,30 @@ def main():
                     help="judge model name. Omit for a mechanical-only pass.")
     ap.add_argument("--api-key", default=None)
     ap.add_argument("--judge-timeout", type=float, default=None)
-    ap.add_argument("--judge-max-tokens", type=int, default=None)
+    ap.add_argument("--judge-think-tokens", type=int, default=None,
+                    help=f"cap on the judge's reasoning tokens (default {JUDGE_THINK_TOKENS}; 0 = thinking off)")
+    ap.add_argument("--judge-no-force", action="store_true",
+                    help="if the reasoning hits its cap, leave the record unjudged instead of "
+                         "asking the judge to answer YES/NO right away")
+    ap.add_argument("--judge-extra-body", default=None, metavar="JSON",
+                    help="extra JSON fields merged into every judge request, e.g. a server's own "
+                         "thinking-budget parameter")
     ap.add_argument("--workers", type=int, default=1, help="concurrent judge calls (default 1)")
     ap.add_argument("--checkpoint-every", type=int, default=25, help="save progress every N judged records")
     args = ap.parse_args()
 
     timeout = args.judge_timeout or JUDGE_TIMEOUT
-    max_tokens = args.judge_max_tokens or JUDGE_MAX_TOKENS
+    think_tokens = JUDGE_THINK_TOKENS if args.judge_think_tokens is None else args.judge_think_tokens
+    if think_tokens < 0:
+        sys.exit("--judge-think-tokens must be 0 or more")
+    extra_body = None
+    if args.judge_extra_body:
+        try:
+            extra_body = json.loads(args.judge_extra_body)
+        except ValueError as e:
+            sys.exit(f"--judge-extra-body is not valid JSON: {e}")
+        if not isinstance(extra_body, dict):
+            sys.exit("--judge-extra-body must be a JSON object")
 
     source = args.out if os.path.exists(args.out) else args.results
     if source == args.out:
@@ -324,9 +402,12 @@ def main():
     judge = None
     if args.judge_model_label:
         base = build_base_url(args.judge_host, args.judge_port)
-        judge = {"base_url": base, "timeout": timeout, "max_tokens": max_tokens,
+        judge = {"base_url": base, "timeout": timeout, "think_tokens": think_tokens,
+                 "force": not args.judge_no_force, "extra_body": extra_body,
                  "api_key": args.api_key or os.environ.get("OPENAI_API_KEY", "not-needed")}
-        print(f"\nJudge: {args.judge_model_label} at {base}")
+        mode = (f"thinking on, reasoning capped at {think_tokens} tokens" if think_tokens
+                else "thinking off")
+        print(f"\nJudge: {args.judge_model_label} at {base} ({mode})")
     else:
         print("\nMechanical only (no --judge-model-label given)")
 
@@ -347,7 +428,7 @@ def main():
                 stats["still_unjudged" if method != "needs_judge" else "needs_judge"] += 1
                 return
             rec["original_method"] = rec["method"]
-            rec["mechanical"] = None if method == "llm_judge" else verdict
+            rec["mechanical"] = None if method.startswith("llm_judge") else verdict
             rec["correct"] = bool(verdict)
             rec["method"] = method
             stats[method] += 1
